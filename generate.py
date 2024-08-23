@@ -15,21 +15,18 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import fire
-import os
-import glob
-from omegaconf import OmegaConf
-from xlstm.xlstm_lm_model import xLSTMLMModel, xLSTMLMModelConfig
-from transformers import PreTrainedTokenizerFast
-from dacite import from_dict
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
-from safetensors.torch import load_file
 import time
 from source.utilities import display_logo
+
+# Register the xLSTM model and configuration.
+import model
 
 
 def generate(
         model_path_or_repo: str,
-        prompt: str,
+        prompt: str = "The ",
         temperature: float = 1.0,
         max_length: int = 100,
 ) -> None:
@@ -52,63 +49,14 @@ def generate(
     # Set the device.
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Download the model if it doesn't exist. Or at least try to.
-    if not os.path.exists(model_path_or_repo):
-        from huggingface_hub import snapshot_download
-        try:
-            model_path=snapshot_download(repo_id=model_path_or_repo)
-            tokenizer_path=model_path
-        except Exception as e:
-            raise f"Failed to download the model: {e}"
-    
-    # Use a local model.
-    else:
-
-        # Set the model path and tokenizer path.
-        model_path = None
-        tokenizer_path = model_path_or_repo
-
-        # Find all the checkpoint folders, folders that start with "checkpoint-". Then find the last one.
-        checkpoint_folders = glob.glob(os.path.join(model_path_or_repo, "checkpoint-*"))
-        for checkpoint_folder in checkpoint_folders:
-            if checkpoint_folder.endswith("-last"):
-                model_path = checkpoint_folder
-                break
-        if model_path is None:
-            raise ValueError("No model checkpoint found.")
-
-        # Find the tokenizer folder.
-        if os.path.exists(os.path.join(model_path_or_repo, "tokenizer.json")):
-            tokenizer_path = model_path_or_repo
-        if not os.path.exists(tokenizer_path):
-            raise ValueError("Tokenizer not found.")
-
-    # Load the config.
-    print(f"Loading model config from {model_path}...")
-    config_path = os.path.join(model_path, "config.yaml")
-    if not os.path.exists(config_path):
-        raise ValueError(f"Config not found at {config_path}")
-    model_config = OmegaConf.load(config_path)
-    print(model_config)
 
     # Create the model from the config.
-    print("Creating model...")
-    model = xLSTMLMModel(from_dict(xLSTMLMModelConfig, OmegaConf.to_container(model_config))).to(device)
-
-    # Load the weights from the checkpoint.
-    print("Loading model weights...")
-    weights_path = os.path.join(model_path, "model.safetensors")
-    if not os.path.exists(weights_path):
-        raise ValueError(f"Weights not found at {weights_path}")
-    state_dict = load_file(weights_path)
-    model.load_state_dict(state_dict)
+    print("Loading model...")
+    model = AutoModelForCausalLM.from_pretrained(model_path_or_repo).to(device)
 
     # Load the tokenizer.
     print("Loading tokenizer...")
-    tokenizer_path = os.path.join(tokenizer_path, "tokenizer.json")
-    if not os.path.exists(tokenizer_path):
-        raise ValueError(f"Tokenizer not found at {tokenizer_path}")
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path_or_repo)
 
     # Tokenize the prompt.
     print("Tokenizing prompt...")
@@ -117,23 +65,15 @@ def generate(
 
     # Generate the continuation.
     start_time = time.time()
-    tokens_count = 0
-    while inputs.shape[1] < max_length:
+    output = model.generate(
+        inputs,
+        do_sample=True,
+        temperature=temperature,
+        max_length=max_length,
+        pad_token_id=tokenizer.eos_token_id,
+    )
 
-        # Generate the continuation.
-        outputs = model(inputs.to(device=device))
-        assert outputs.shape[0] == 1
-
-        # Use the temperature to sample from the distribution.
-        outputs = outputs / temperature
-        outputs = torch.nn.functional.softmax(outputs, dim=-1)
-        outputs = torch.multinomial(outputs[0, -1], num_samples=1)
-
-        # Add to the inputs.
-        inputs = torch.cat([inputs, outputs.unsqueeze(0)], dim=1)
-        
-        # Increment the tokens count.
-        tokens_count += 1
+    tokens_count = inputs.shape[1]
 
     # Print the elapsed time and tokens per second.
     elapsed_time = time.time() - start_time
@@ -142,7 +82,8 @@ def generate(
     print(f"Tokens per second: {tokens_per_second:.2f}")
 
     # Decode the output.
-    output = tokenizer.decode(inputs[0].tolist())
+    output = tokenizer.decode(output[0], skip_special_tokens=True)
+    print("\033[92mGenerated text:\033[0m")
     print(output)
 
 

@@ -14,11 +14,37 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+import json
 import fire
 import os
 import glob
 from huggingface_hub import create_repo
 from huggingface_hub import HfApi
+
+
+def update_readme_md(readme_path: str, model_name: str = "xLSTM", orga: str = "PatrickHaller"):
+    with open(readme_path, "r") as f:
+        content = f.read()
+
+    content = content.replace("<PLACEHOLDER_MODEL_NAME>", model_name)
+    content = content.replace("<PLACEHOLDER_ORGA>", orga)
+
+    with open(readme_path, "w") as f:
+        f.write(content)
+
+
+def update_config_json(config_path: str):
+    with open(config_path, "r") as f:
+        content = json.load(f)
+        if "auto_map" not in content:
+            content["auto_map"] = {
+                "AutoConfig": "configuration_xlstm.xLSTMConfig",
+                "AutoModelForCausalLM": "modeling_xlstm.xLSTMForCausalLM",
+                "AutoModel": "modeling_xlstm.xLSTMModel",
+            }
+
+    with open(config_path, "w") as f:
+        json.dump(content, f, indent=2)
 
 def push_to_huggingface(
         model_path: str,
@@ -42,29 +68,45 @@ def push_to_huggingface(
     
     # Add the files that are required.
     files = [
-        os.path.join(model_path, "tokenizer.json"),
-        os.path.join(model_path, "special_tokens_map.json"),
+        # os.path.join(model_path, "tokenizer.json"),
+        # os.path.join(model_path, "special_tokens_map.json"),
+        # os.path.join(model_path, "tokenizer_config.json"),
+        # os.path.join(model_path, "README.md"),
+        # os.path.join(model_path, "banner.jpg"),
+
+        os.path.join("model", "README.md"),
+        os.path.join("model", "configuration_xlstm.py"),
+        os.path.join("model", "modeling_xlstm.py"),
         os.path.join(model_path, "tokenizer_config.json"),
-        os.path.join(model_path, "README.md"),
-        os.path.join(model_path, "banner.jpg"),
+        os.path.join(model_path, "tokenizer.json"),
+        os.path.join(model_path, "generation_config.json"),
+        os.path.join(model_path, "model.safetensors"),
+        os.path.join(model_path, "special_tokens_map.json"),
+        os.path.join(model_path, "config.json"),
     ]
+    
+    update_readme_md(files[0], model_name=repo_name, orga=username_or_orga)
+    # Update config.json so we include the auto mapping from the hub repo
+    update_config_json(files[-1])
+
 
     # Find all the checkpoints. Make sure these are folders.
     checkpoints = glob.glob(os.path.join(model_path, "checkpoint-*"))
     checkpoints = [checkpoint for checkpoint in checkpoints if os.path.isdir(checkpoint)]
-    if len(checkpoints) == 0:
-        raise ValueError("No checkpoints found.")
+    if len(checkpoints) > 0:
 
-    # Find the last checkpoint. It begins with "checkpoint-" and ends with a "-last".
-    last_checkpoint = None
-    for checkpoint in checkpoints:
-        if checkpoint.endswith("-last"):
-            last_checkpoint = checkpoint
-            break
-    if last_checkpoint is None:
-        raise ValueError("No last checkpoint found.")
-    files += [os.path.join(last_checkpoint, "model.safetensors")]
-    files += [os.path.join(last_checkpoint, "config.yaml")]
+        # Find the last checkpoint. It begins with "checkpoint-" and ends with a "-last".
+        last_checkpoint = None
+        for checkpoint in checkpoints:
+            if checkpoint.endswith("-last"):
+                last_checkpoint = checkpoint
+                break
+        if last_checkpoint is None:
+            raise ValueError("No last checkpoint found.")
+        files += [os.path.join(last_checkpoint, "model.safetensors")]
+        files += [os.path.join(last_checkpoint, "config.yaml")]
+    else:
+        print("No checkpoints found.")
 
     # Check if all files exist.
     for file in files:
