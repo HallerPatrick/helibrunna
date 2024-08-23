@@ -66,16 +66,19 @@ config_schema = {
                 "num_heads": int,
             },
         },
-        "slstm_block": {
-            "slstm": {
-                "num_heads": int,
-            },
-        },
+        # "slstm_block": {
+        #     "slstm": {
+        #         "num_heads": int,
+        #     },
+        # },
         "slstm_at": [int],
         "context_length": int,
     },
     "dataset": {
-        "hugging_face_id": str,
+        "hugging_face_id": (str, list),
+        "split": str,
+        "shuffle": bool,
+        "seed": int,
     },
     "tokenizer": {
         "type": str,

@@ -85,11 +85,14 @@ def run_training(config_path: str):
     gradient_accumulation_steps = config.training.get("gradient_accumulation_steps", 1)
     # config.training.batch_size = config.training.batch_size * gradient_accumulation_steps
 
-    # Initialize the accelerator.
+    from accelerate import DistributedDataParallelKwargs
+
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     accelerator = Accelerator(
         log_with=loggers,
         project_dir=output_dir,
         gradient_accumulation_steps=gradient_accumulation_steps,
+        kwargs_handlers=[ddp_kwargs]
     )
 
     # Display the logo.
@@ -119,8 +122,6 @@ def run_training(config_path: str):
 
     # Create the model.
     accelerator.print("Creating model...")
-    xLSTMConfig.register_for_auto_class()
-    xLSTMForCausalLM.register_for_auto_class("AutoModelForCausalLM")
     hf_model_config = xLSTMConfig(vocab_size=vocab_size, config=config.model)
     model = xLSTMForCausalLM(hf_model_config)
     model.reset_parameters()
@@ -141,7 +142,7 @@ def run_training(config_path: str):
     train_dataloader = DataLoader(
         tokenized_datasets,
         batch_size=config.training.batch_size,
-        shuffle=True,
+        shuffle=False,
         collate_fn=data_collator,
     )
 
@@ -166,6 +167,7 @@ def run_training(config_path: str):
         ),
         lr=config.training.lr,
     )
+
     lr_scheduler = LinearWarmupCosineAnnealing(
         optimizer,
         config.training.lr_warmup_steps,
@@ -177,8 +179,8 @@ def run_training(config_path: str):
     )
 
     # Prepare model, optimizer, and dataloader for accelerator.
-    model, optimizer, train_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader
+    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, lr_scheduler
     )
 
     # Get some parameters.
@@ -230,22 +232,17 @@ def run_training(config_path: str):
     progress_bar = tqdm(total=num_steps, desc="Training", unit="step", colour="GREEN")
 
     for epoch in range(num_epochs):
+        model.train()
         for batch in train_dataloader:
-            # Assuming batch only contains 'input_ids'
-            inputs = batch["input_ids"].to(accelerator.device)
+            with accelerator.accumulate(model):  
+                # Assuming batch only contains 'input_ids'
+                inputs = batch["input_ids"]
 
-            # Get the labels by shifting the inputs. Remove the first token. Fill the last token with 0.
-            labels = torch.roll(inputs, -1, dims=1)
-            labels[:, -1] = 0
+                # Get the labels by shifting the inputs. Remove the first token. Fill the last token with 0.
+                labels = torch.roll(inputs, -1, dims=1)
+                labels[:, -1] = 0
 
-            # Forward pass.
-            model.train()
-            optimizer.zero_grad()
-            # with accelerator.accumulate(model):
-            with accelerator.accumulate(
-                model
-            ):  # , torch.autocast(device_type=accelerator.device.type, dtype=training_dtype, enabled=enable_mixed_precision):
-                outputs = model(inputs.to(device=accelerator.device), return_dict=True)
+                outputs = model(inputs, return_dict=True)
                 logits = outputs.logits
                 loss = torch.nn.functional.cross_entropy(
                     logits.view(-1, vocab_size),
@@ -255,53 +252,54 @@ def run_training(config_path: str):
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
+                optimizer.zero_grad()
                 running_loss.append(loss.item())
 
-            # Next step.
-            step += 1
+                # Next step.
+                step += 1
 
-            # Save every step.
-            if step % save_every_step == 0 and step > 0 and save_every_step > 0:
-                checkpoint_dir = os.path.join(output_dir, f"checkpoint-{step}")
-                accelerator.wait_for_everyone()
-                save_model(
-                    accelerator.unwrap_model(model),
-                    model_config,
-                    tokenizer,
-                    checkpoint_dir,
-                )
+                # Save every step.
+                if step % save_every_step == 0 and step > 0 and save_every_step > 0:
+                    checkpoint_dir = os.path.join(output_dir, f"checkpoint-{step}")
+                    accelerator.wait_for_everyone()
+                    save_model(
+                        accelerator.unwrap_model(model),
+                        model_config,
+                        tokenizer,
+                        checkpoint_dir,
+                    )
 
-            # Log every step.
-            if step % log_every_step == 0 and step > 0 and log_every_step > 0:
-                # Update the log.
-                average_loss = sum(running_loss) / len(running_loss)
-                last_lr = lr_scheduler.get_last_lr()[0]
-                history["loss"].append(average_loss)
-                history["lr"].append(last_lr)
-                history["step"].append(step)
-                running_loss = []
+                # Log every step.
+                if step % log_every_step == 0 and step > 0 and log_every_step > 0:
+                    # Update the log.
+                    average_loss = sum(running_loss) / len(running_loss)
+                    last_lr = lr_scheduler.get_last_lr()[0]
+                    history["loss"].append(average_loss)
+                    history["lr"].append(last_lr)
+                    history["step"].append(step)
+                    running_loss = []
 
-                # Log to wandb.
-                if wandb_enabled:
-                    accelerator.log({"loss": average_loss, "lr": last_lr}, step=step)
+                    # Log to wandb.
+                    if wandb_enabled:
+                        accelerator.log({"loss": average_loss, "lr": last_lr}, step=step)
 
-                # Update the progressbar. Use the step as the total. Also display the loss and lr.
-                progress_bar.set_postfix({"loss": average_loss, "lr": last_lr})
-                progress_bar.update(log_every_step)
+                    # Update the progressbar. Use the step as the total. Also display the loss and lr.
+                    progress_bar.set_postfix({"loss": average_loss, "lr": last_lr})
+                    progress_bar.update(log_every_step)
 
-            if step % generate_every_step == 0 and step > 0 and generate_every_step > 0:
-                accelerator.unwrap_model(model).eval()
-                prompt = "The "
-                input_ids = tokenizer.encode(prompt, return_tensors="pt").to(
-                    accelerator.device
-                )
-                output = accelerator.unwrap_model(model).generate(
-                    input_ids, max_length=100, temperature=0.7, do_sample=True
-                )
-                generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-                # Print with green highlight.
-                accelerator.print(f"\033[92mGenerated text:\033[0m {generated_text}")
-                accelerator.unwrap_model(model).train()
+                if step % generate_every_step == 0 and step > 0 and generate_every_step > 0:
+                    accelerator.unwrap_model(model).eval()
+                    prompt = "The "
+                    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(
+                        accelerator.device
+                    )
+                    output = accelerator.unwrap_model(model).generate(
+                        input_ids, max_length=100, temperature=0.7, do_sample=True
+                    )
+                    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+                    # Print with green highlight.
+                    accelerator.print(f"\033[92mGenerated text:\033[0m {generated_text}")
+                    accelerator.unwrap_model(model).train()
 
     # End training.
     progress_bar.close()
@@ -525,10 +523,16 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
 
     # Load the dataset.
     hugging_face_id = config.dataset.hugging_face_id
+
+    if isinstance(hugging_face_id, str):
+        hugging_face_id = (hugging_face_id,)
+
     model_name = config.training.model_name
-    data_path = f"./preprocessed/{model_name}/data"
-    tokenizer_path = f"./preprocessed/{model_name}/tokenizer"
-    tokenized_data_path = f"./preprocessed/{model_name}/tokenized_datasets"
+    output_path = config.dataset.output_path
+
+    data_path = os.path.join(output_path, f"preprocessed/{model_name}/data")
+    tokenizer_path = os.path.join(output_path, f"preprocessed/{model_name}/tokenizer")
+    tokenized_data_path = os.path.join(output_path, f"preprocessed/{model_name}/tokenized_datasets")
 
     # If tokenizer and tokenized datasets exist, and ask_for_overwrite is True, ask for overwrite.
     if (
@@ -553,7 +557,7 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
     # Download the dataset.
     if accelerator.is_local_main_process:
         accelerator.print(f"Loading dataset: {hugging_face_id}")
-        raw_datasets = load_dataset(hugging_face_id, split=config.dataset.split)
+        raw_datasets = load_dataset(*hugging_face_id, split=config.dataset.split)
 
         # Save the dataset to disk to be reused by other processes.
         raw_datasets.save_to_disk(data_path)
@@ -610,6 +614,11 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
     # assert vocab_size > 0
     # config.model.vocab_size = vocab_size
 
+    if config.dataset.shuffle:
+        if accelerator.is_local_main_process:
+            accelerator.print("Shuffling dataset...")
+            raw_datasets = raw_datasets.shuffle(seed=config.dataset.seed)
+
     # Tokenize the datasets.
     def tokenize_function(example):
         tokenized_example = tokenizer(
@@ -644,6 +653,8 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
         assert list(tokenized.keys()) == ["input_ids"], list(tokenized.keys())
         accelerator.print(f"Original text: {sample}")
         accelerator.print(f"Tokenized text: {tokenized}")
+
+        print("Data saved to: ", data_path)
 
     return tokenized_datasets, tokenizer
 

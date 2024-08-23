@@ -27,6 +27,9 @@ class xLSTMBlockStack(_xLSTMBlockStack):
         for block in self.blocks:
             x = block(x, **kwargs)
             hidden_states += (x,)
+
+        x = self.post_blocks_norm(x)
+
         return x, hidden_states
 
 
@@ -47,6 +50,7 @@ class xLSTMModel(xLSTMPreTrainedModel):
         )
 
         self.xlstm_block_stack = xLSTMBlockStack(config=_config)
+
 
     def forward(
         self,
