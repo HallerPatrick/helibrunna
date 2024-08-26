@@ -264,7 +264,7 @@ def run_training(config_path: str):
                     accelerator.wait_for_everyone()
                     save_model(
                         accelerator.unwrap_model(model),
-                        model_config,
+                        hf_model_config,
                         tokenizer,
                         checkpoint_dir,
                     )
@@ -314,7 +314,7 @@ def run_training(config_path: str):
     accelerator.wait_for_everyone()
 
     save_model(
-        hf_model_config, accelerator.unwrap_model(model), tokenizer, checkpoint_dir
+        accelerator.unwrap_model(model), hf_model_config, tokenizer, checkpoint_dir
     )
 
     # Save the history as JSON.

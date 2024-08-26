@@ -2,8 +2,9 @@ from typing import Optional, Sequence, Tuple, Union
 
 import torch
 from torch import nn
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import PreTrainedModel
-from transformers.modeling_outputs import BaseModelOutput, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutput, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
 from xlstm.components.init import small_init_init_
 from xlstm.utils import WeightDecayOptimGroupMixin
 from xlstm.xlstm_block_stack import xLSTMBlockStack as _xLSTMBlockStack
@@ -212,3 +213,84 @@ class xLSTMForCausalLM(xLSTMPreTrainedModel, WeightDecayOptimGroupMixin):
             "input_ids": input_ids.to(self.device),
         }
         return model_inputs
+
+
+class xLSTMForSequenceClassification(xLSTMPreTrainedModel):
+
+    def __init__(self, config: xLSTMConfig, **kwargs):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+        self.model = xLSTMModel(config)
+        self.classifier = nn.Linear(config.embedding_dim, config.num_labels, bias=False)
+
+        self.init_weights()
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        labels: Optional[torch.LongTensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ):
+        output = self.model(
+            input_ids,
+            output_hidden_states=output_hidden_states,
+        )
+
+        hidden_state = output[0]
+
+        logits = self.classifier(hidden_state)
+        batch_size = input_ids.shape[0]
+
+        if self.config.pad_token_id is None and batch_size != 1:
+            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+        if self.config.pad_token_id is None:
+            sequence_lengths = -1
+        else:
+            if input_ids is not None:
+                # if no pad token found, use modulo instead of reverse indexing for ONNX compatibility
+                sequence_lengths = torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
+                sequence_lengths = sequence_lengths % input_ids.shape[-1]
+                sequence_lengths = sequence_lengths.to(logits.device)
+            else:
+                sequence_lengths = -1
+
+
+        pooled_logits = logits[torch.arange(batch_size, device=logits.device), sequence_lengths]
+
+        loss = None
+
+        if labels is not None:
+            labels = labels.to(logits.device)
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(pooled_logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(pooled_logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(pooled_logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(pooled_logits, labels)
+
+        if not return_dict:
+            output = (pooled_logits,) + output[1:]
+            return ((loss,) + output) if loss is not None else output
+
+
+        return SequenceClassifierOutputWithPast(
+            loss=loss,
+            logits=pooled_logits,
+            hidden_states=output.hidden_states,
+        )
