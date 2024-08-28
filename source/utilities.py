@@ -57,6 +57,7 @@ config_schema = {
         "save_every_step": int,
         "log_every_step": int,
         "wandb_project": str,
+        "max_grad_norm": float
     },
     "model": {
         "num_blocks": int,

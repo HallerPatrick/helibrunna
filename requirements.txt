@@ -5,3 +5,4 @@ accelerate==0.33.0
 wandb==0.17.6
 tensorboard==2.17.1
 colorama==0.4.6
+omegaconf

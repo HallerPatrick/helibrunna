@@ -8,6 +8,7 @@ training:
   lr_decay_until_steps: "auto"
   lr_decay_factor: 0.001
   weight_decay: 0.1
+  max_grad_norm: 0.25
   amp_precision: bfloat16
   weight_precision: float32
   enable_mixed_precision: true
@@ -15,7 +16,7 @@ training:
   output_dir: "output/lovecraftxlstm"
   save_every_step: 100000
   log_every_step: 10
-  generate_every_step: 3000
+  generate_every_step: 1000
   wandb_project: ""
   # wandb_project: "lovecraftxlstm"
 
@@ -32,8 +33,11 @@ model:
   context_length: 256
 
 dataset:
+  output_path: lovecraft_dataset
   hugging_face_id: "TristanBehrens/lovecraftcorpus"
   split: "train" # Also subsetting is possible: "train[:100_000]"
+  shuffle: False
+  seed: 42
   
 tokenizer:
   type: "pretrained"

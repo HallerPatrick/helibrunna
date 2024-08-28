@@ -35,7 +35,14 @@ from tqdm import tqdm
 from transformers import (DataCollatorForLanguageModeling,
                           PreTrainedTokenizerFast)
 
-from model import xLSTMConfig, xLSTMForCausalLM
+try:
+    import xlstm
+    from model import xLSTMConfig, xLSTMForCausalLM
+except ImportError:
+    print("xLSTM package not installed or not available.")
+    print("Please visit https://github.com/NX-AI/xlstm")
+    exit()
+
 from source.utilities import (display_logo, human_readable_number,
                               validate_config)
 
@@ -156,17 +163,21 @@ def run_training(config_path: str):
     accelerator.print(f"Estimated number of steps: {num_steps:_}")
 
     # Prepare the optimizer and learning rate scheduler.
-    optimizer_groups = model._create_weight_decay_optim_groups()
-    optimizer = torch.optim.AdamW(
-        (
-            {
-                "weight_decay": config.training.weight_decay,
-                "params": optimizer_groups[0],
-            },
-            {"weight_decay": 0.0, "params": optimizer_groups[1]},
-        ),
-        lr=config.training.lr,
-    )
+    try:
+        optimizer_groups = model._create_weight_decay_optim_groups()
+        optimizer = torch.optim.AdamW(
+            (
+                {
+                    "weight_decay": config.training.weight_decay,
+                    "params": optimizer_groups[0],
+                },
+                {"weight_decay": 0.0, "params": optimizer_groups[1]},
+            ),
+            lr=config.training.lr,
+        )
+    except:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=config.training.weight_decay)
+
 
     lr_scheduler = LinearWarmupCosineAnnealing(
         optimizer,
@@ -189,6 +200,7 @@ def run_training(config_path: str):
     generate_every_step = config.training.generate_every_step
     num_epochs = config.training.num_epochs
     enable_mixed_precision = config.training.enable_mixed_precision
+    max_grad_norm = config.training.max_grad_norm
     wandb_project = config.training.get("wandb_project", None)
     wandb_enabled = wandb_project is not None and wandb_project != ""
 
@@ -252,6 +264,7 @@ def run_training(config_path: str):
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.zero_grad()
                 running_loss.append(loss.item())
 
