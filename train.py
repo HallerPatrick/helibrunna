@@ -14,6 +14,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import datetime
+from itertools import chain
 import json
 import multiprocessing
 import os
@@ -650,11 +651,28 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
     def tokenize_function(example):
         tokenized_example = tokenizer(
             example["text"],
-            truncation=True,
+            truncation=False,
             padding=False,
             max_length=config.model.context_length,
         )
         return {"input_ids": tokenized_example["input_ids"]}
+
+    def group_texts(examples):
+        # Concatenate all texts.
+        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
+        # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
+
+        block_size = config.model.context_length
+        total_length = (total_length // block_size) * block_size
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
+        }
+        # result["labels"] = result["input_ids"].copy()
+        return result
 
     if accelerator.is_local_main_process:
         accelerator.print("Tokenizing datasets...")
@@ -664,6 +682,12 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
             remove_columns=raw_datasets.column_names,
             num_proc=multiprocessing.cpu_count(),
         )
+        tokenized_datasets = tokenized_datasets.map(
+            group_texts,
+            batched=True,
+            num_proc=multiprocessing.cpu_count(),
+        )
+
         tokenized_datasets.save_to_disk(tokenized_data_path)
     else:
         while not os.path.exists(tokenized_data_path):
