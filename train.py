@@ -33,12 +33,13 @@ from tokenizers.trainers import WordLevelTrainer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (DataCollatorForLanguageModeling,
-                          PreTrainedTokenizerFast)
+                          PreTrainedTokenizerFast, get_scheduler)
 
 try:
     import xlstm
     from model import xLSTMConfig, xLSTMForCausalLM
-except ImportError:
+except ImportError as e:
+    print(e)
     print("xLSTM package not installed or not available.")
     print("Please visit https://github.com/NX-AI/xlstm")
     exit()
@@ -56,6 +57,7 @@ if not os.path.exists("experiments/lr_scheduler.py"):
     )
     os.makedirs("experiments", exist_ok=True)
     urllib.request.urlretrieve(url, "experiments/lr_scheduler.py")
+
 from experiments.lr_scheduler import LinearWarmupCosineAnnealing
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -120,6 +122,9 @@ def run_training(config_path: str):
     # Preprocess the dataset and tokenizer.
     tokenized_datasets, tokenizer = preprocess(config, accelerator)
 
+    if config.model.context_length != tokenizer.model_max_length:
+        tokenizer.model_max_length = config.model.context_length
+
     # Get the vocabulary size.
     vocab_size = tokenizer.vocab_size
     config.model.vocab_size = vocab_size
@@ -162,6 +167,7 @@ def run_training(config_path: str):
     num_steps = num_steps // accelerator.num_processes
     accelerator.print(f"Estimated number of steps: {num_steps:_}")
 
+
     # Prepare the optimizer and learning rate scheduler.
     try:
         optimizer_groups = model._create_weight_decay_optim_groups()
@@ -178,16 +184,24 @@ def run_training(config_path: str):
     except:
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=config.training.weight_decay)
 
+    
+    if config.training.lr_scheduler == "cosine_with_warmup":
+        lr_scheduler = LinearWarmupCosineAnnealing(
+            optimizer=optimizer,
+            warmup_steps=config.training.lr_warmup_steps * accelerator.num_processes,
+            decay_until_step=config.training.lr_decay_until_steps if config.training.lr_decay_until_steps != "auto"
+            else num_steps * accelerator.num_processes,
+            max_lr=config.training.lr,
+            min_lr=config.training.lr_decay_factor * config.training.lr,
+        )
+    else:
+        lr_scheduler = get_scheduler(
+            config.training.lr_scheduler,
+            optimizer,
+            num_warmup_steps=config.training.lr_warmup_steps * accelerator.num_processes,
+            num_training_steps=num_steps * accelerator.num_processes,
+        )
 
-    lr_scheduler = LinearWarmupCosineAnnealing(
-        optimizer,
-        config.training.lr_warmup_steps,
-        config.training.lr_decay_until_steps
-        if config.training.lr_decay_until_steps != "auto"
-        else num_steps,
-        config.training.lr,
-        config.training.lr_decay_factor * config.training.lr,
-    )
 
     # Prepare model, optimizer, and dataloader for accelerator.
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -241,7 +255,7 @@ def run_training(config_path: str):
     }
 
     # Add a green progress bar.
-    progress_bar = tqdm(total=num_steps, desc="Training", unit="step", colour="GREEN")
+    progress_bar = tqdm(total=num_steps, desc="Training", unit="step", colour="YELLOW")
 
     for epoch in range(num_epochs):
         model.train()
