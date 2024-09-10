@@ -186,7 +186,7 @@ def run_training(config_path: str):
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=config.training.weight_decay)
 
     
-    if config.training.lr_scheduler == "cosine_with_warmup":
+    if config.training.get("lr_scheduler", "cosine_with_warmup") == "cosine_with_warmup":
         lr_scheduler = LinearWarmupCosineAnnealing(
             optimizer=optimizer,
             warmup_steps=config.training.lr_warmup_steps * accelerator.num_processes,
@@ -651,11 +651,8 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
     def tokenize_function(example):
         tokenized_example = tokenizer(
             example["text"],
-            truncation=False,
-            padding=False,
-            max_length=config.model.context_length,
         )
-        return {"input_ids": tokenized_example["input_ids"]}
+        return tokenized_example
 
     def group_texts(examples):
         # Concatenate all texts.
@@ -671,7 +668,6 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
             k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
             for k, t in concatenated_examples.items()
         }
-        # result["labels"] = result["input_ids"].copy()
         return result
 
     if accelerator.is_local_main_process:
@@ -686,7 +682,8 @@ def preprocess(config, accelerator=None, ask_for_overwrite=False):
             group_texts,
             batched=True,
             num_proc=multiprocessing.cpu_count(),
-        )
+            desc=f"Grouping texts in chunks of {config.model.context_length}",
+        ).remove_columns("attention_mask")
 
         tokenized_datasets.save_to_disk(tokenized_data_path)
     else:
